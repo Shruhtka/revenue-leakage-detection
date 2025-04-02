@@ -1,144 +1,171 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-from sklearn.ensemble import IsolationForest
-from sklearn.cluster import DBSCAN, KMeans
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import precision_score, recall_score, f1_score
 import shap
 import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.ensemble import IsolationForest
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
+import numpy as np
+import joblib
 
-# ======================== SETUP ========================
-st.set_page_config(page_title="Revenue Leakage Smart Dashboard", layout="wide")
-st.title("💸 Revenue Leakage Detection")
-
-# ======================== LOAD DATA ========================
-required_columns = ["Transaction_ID", "Invoice_Amount", "Discount_Applied", "Refund_Issued", "Transaction_Type", "Anomaly_Tag"]
+st.set_page_config(layout="wide", page_title="Revenue Leakage Detection")
 
 @st.cache_data
 def load_default_data():
     return pd.read_csv("Synthetic_Financial_Transactions.csv")
 
-st.sidebar.markdown("---")
-uploaded_file = st.sidebar.file_uploader("📤 Upload Your Own CSV", type=["csv"])
-
-if uploaded_file is not None:
+@st.cache_resource
+def load_models():
+    models = {}
     try:
-        df = pd.read_csv(uploaded_file)
-        if not all(col in df.columns for col in required_columns):
-            st.sidebar.error("❌ Uploaded file is missing required columns.")
-            df = load_default_data()
-        else:
-            st.sidebar.success("✅ File uploaded successfully!")
+        models["Isolation Forest"] = joblib.load("if_model.pkl")
     except Exception as e:
-        st.sidebar.error(f"Error reading file: {e}")
-        df = load_default_data()
-else:
-    df = load_default_data()
+        st.warning(f"Isolation Forest failed to load: {e}")
+        models["Isolation Forest"] = IsolationForest(random_state=42)
 
-features = ["Invoice_Amount", "Discount_Applied", "Refund_Issued"]
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(df[features])
+    try:
+        models["K-Means"] = joblib.load("kmeans_model.pkl")
+    except Exception as e:
+        st.warning(f"K-Means failed to load: {e}")
+        models["K-Means"] = KMeans(n_clusters=2, random_state=42)
+    try:
+        models["DBSCAN"] = joblib.load("dbscan_model.pkl")
+    except Exception as e:
+        st.warning(f"DBSCAN fallback used: {e}")
+        models["DBSCAN"] = DBSCAN(eps=0.5, min_samples=5)
 
-# ======================== SIDEBAR ========================
-st.sidebar.title("⚙️ Controls")
-model_choice = st.sidebar.selectbox("🧠 Select ML Model", ["Isolation Forest", "DBSCAN", "K-Means"])
-view_choice = st.sidebar.radio("🎯 Show anomalies detected by:", ["Model", "Ground Truth"])
-anomaly_filter = st.sidebar.multiselect("🔍 Filter Anomaly Type", options=df["Anomaly_Tag"].unique(), default=list(df["Anomaly_Tag"].unique()))
+    return models
 
-# ======================== MODEL PREDICTIONS ========================
-df_model = df.copy()
+def preprocess(df):
+    df['Transaction_Date'] = pd.to_datetime(df['Transaction_Date'], errors='coerce')
+    df['Payment_Date'] = pd.to_datetime(df['Payment_Date'], errors='coerce')
+    df['PaymentDelay'] = (df['Payment_Date'] - df['Transaction_Date']).dt.days.fillna(0)
+    df['DiscountApplied'] = df['Discount_Applied']
+    df['RefundAmount'] = df['Refund_Issued']
+    df['InvoiceAmount'] = df['Invoice_Amount']
+    return df, df[['DiscountApplied', 'RefundAmount', 'InvoiceAmount', 'PaymentDelay']]
 
-if model_choice == "Isolation Forest":
-    model = IsolationForest(n_estimators=100, contamination=0.10, random_state=42)
-    preds = model.fit_predict(X_scaled)
-    df_model["Model_Anomaly"] = pd.Series(preds).map({1: "Normal", -1: "Anomaly"})
+uploaded = st.sidebar.file_uploader("Upload CSV File", type=["csv"])
+data = pd.read_csv(uploaded) if uploaded else load_default_data()
+data, X = preprocess(data)  # Now X is defined
+# Convert Anomaly_Tag to binary
+if 'Anomaly_Tag' in data.columns:
+    data['Anomaly_Tag'] = data['Anomaly_Tag'].apply(lambda x: 0 if str(x).strip().lower() == 'normal' else 1)
 
-elif model_choice == "DBSCAN":
-    model = DBSCAN(eps=1.5, min_samples=5)
-    preds = model.fit_predict(X_scaled)
-    df_model["Model_Anomaly"] = ["Anomaly" if p == -1 else "Normal" for p in preds]
 
-elif model_choice == "K-Means":
-    model = KMeans(n_clusters=2, random_state=42)
-    preds = model.fit_predict(X_scaled)
-    anomaly_cluster = pd.Series(preds).value_counts().idxmin()
-    df_model["Model_Anomaly"] = ["Anomaly" if p == anomaly_cluster else "Normal" for p in preds]
+# Now it's safe to load models
+models = load_models()
 
-# ======================== METRICS FOR SELECTED MODEL ========================
-y_true = df_model["Anomaly_Tag"].apply(lambda x: 1 if x != "Normal" else 0)
-y_pred = df_model["Model_Anomaly"].apply(lambda x: 1 if x != "Normal" else 0)
+def run_model(name, X):
+    if name == "Hybrid (IF + DBSCAN)":
+        if_preds = np.where(models["Isolation Forest"].predict(X) == -1, 1, 0)
+        db_preds = np.where(models["DBSCAN"].fit_predict(X) == -1, 1, 0)
+        return ((if_preds + db_preds) >= 2).astype(int)
+    elif name == "DBSCAN":
+        preds = models["DBSCAN"].fit_predict(X)
+        return np.where(preds == -1, 1, 0)
+    elif name == "K-Means":
+        km = models["K-Means"]
+        if not hasattr(km, "cluster_centers_"):
+            km.fit(X)
+        labels = km.predict(X)
+        dists = np.linalg.norm(X.values - km.cluster_centers_[labels], axis=1)
+        return (dists > np.percentile(dists, 90)).astype(int)
+    else:
+        return np.where(models[name].predict(X) == -1, 1, 0)
 
-precision = precision_score(y_true, y_pred, zero_division=0)
-recall = recall_score(y_true, y_pred, zero_division=0)
-f1 = f1_score(y_true, y_pred, zero_division=0)
+def evaluate(y_true, y_pred):
+    y_true = pd.to_numeric(y_true, errors='coerce').fillna(0).astype(int)
+    cm = confusion_matrix(y_true, y_pred)
+    precision = precision_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+    fpr = cm[0][1] / (cm[0][0] + cm[0][1]) if (cm[0][0] + cm[0][1]) > 0 else 0.0
+    return precision, recall, f1, fpr
 
-# ======================== FILTER BASED ON VIEW ========================
-if view_choice == "Model":
-    filtered_df = df_model[df_model["Model_Anomaly"] == "Anomaly"]
-    view_label = "Model-Detected"
-else:
-    filtered_df = df_model[df_model["Anomaly_Tag"] != "Normal"]
-    view_label = "Ground Truth"
+def explain_with_shap(model, X):
+    try:
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X)
+        return explainer.expected_value, shap_values
+    except Exception as e:
+        st.warning(f"SHAP explainability failed: {e}")
+        return None, None
 
-if view_choice == "Ground Truth":
-    filtered_df = filtered_df[filtered_df["Anomaly_Tag"].isin(anomaly_filter)]
+st.title("💸 Revenue Leakage Detection Dashboard")
+tabs = st.tabs(["📊 Overview", "🔍 Model Output", "📈 SHAP Explainability", "📊 Compare Models"])
 
-# ======================== DISPLAY METRICS ========================
-st.subheader(f"📊 {view_label} Anomalies Overview ({model_choice})")
-col1, col2, col3 = st.columns(3)
-col1.metric("Total Transactions", len(df_model))
-col2.metric("Anomalies Detected", len(filtered_df))
-col3.metric("Model", model_choice)
+with tabs[0]:
+    st.markdown("""
+    This dashboard identifies **operational revenue leakages**:
+    - Duplicate invoices
+    - Missed payments
+    - Unauthorized refunds or discounts
+    Models supported: Isolation Forest, DBSCAN, K-Means, Hybrid (IF + DBSCAN)
+    SHAP explanations are available for Isolation Forest only.
+    """)
 
-st.subheader("📈 Model Evaluation Metrics")
-col1, col2, col3 = st.columns(3)
-col1.metric("🎯 Precision", f"{precision:.2f}")
-col2.metric("📞 Recall", f"{recall:.2f}")
-col3.metric("📐 F1-Score", f"{f1:.2f}")
+with tabs[1]:
+    model_option = st.selectbox("Choose Model", list(models.keys()) + ["Hybrid (IF + DBSCAN)"])
+    predictions = run_model(model_option, X)
+    data['Prediction'] = predictions
 
-# ======================== DATA TABLE ========================
-st.markdown("### 📋 Anomaly Table")
-st.dataframe(filtered_df[["Transaction_ID", "Invoice_Amount", "Discount_Applied", "Refund_Issued", "Transaction_Type", "Anomaly_Tag", "Model_Anomaly"]], use_container_width=True)
+    if 'Anomaly_Tag' in data.columns:
+        precision, recall, f1, fpr = evaluate(data['Anomaly_Tag'], predictions)
+    else:
+        precision = recall = f1 = fpr = 0.0
 
-# ======================== CHART ========================
-st.markdown("### 📈 Invoice vs Refund Plot")
-fig = px.scatter(filtered_df, x="Invoice_Amount", y="Refund_Issued", color="Transaction_Type",
-                 symbol="Model_Anomaly" if view_choice == "Model" else "Anomaly_Tag",
-                 hover_data=["Transaction_ID", "Discount_Applied"], title="Anomalies Scatter Plot")
-st.plotly_chart(fig, use_container_width=True)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Precision", f"{precision:.2f}")
+    col2.metric("Recall", f"{recall:.2f}")
+    col3.metric("F1 Score", f"{f1:.2f}")
+    col4.metric("False Positive Rate", f"{fpr:.2%}")
 
-# ======================== DOWNLOAD ========================
-st.markdown("### 💾 Download Anomalies")
-download_csv = filtered_df.to_csv(index=False).encode('utf-8')
-st.download_button("📥 Download CSV", data=download_csv, file_name=f"{view_label.replace(' ', '_')}_{model_choice}.csv", mime='text/csv')
+    st.subheader("🔎 Flagged Anomalies")
+    anomalies = data[data['Prediction'] == 1]
+    st.dataframe(anomalies, use_container_width=True)
+    st.download_button("📥 Download Anomalies", anomalies.to_csv(index=False), "anomalies.csv")
 
-# ======================== SHAP EXPLAINABILITY ========================
-st.markdown("---")
-st.subheader("🧠 SHAP Explainability (Only for Isolation Forest)")
+    st.subheader("📈 Feature Scatterplot")
+    xcol, ycol = st.selectbox("X-Axis", X.columns), st.selectbox("Y-Axis", X.columns, index=1)
+    fig, ax = plt.subplots()
+    sns.scatterplot(x=X[xcol], y=X[ycol], hue=predictions, palette=['blue', 'red'], ax=ax)
+    ax.set_title("Anomaly Distribution")
+    st.pyplot(fig)
 
-if model_choice == "Isolation Forest":
-    iso_model = IsolationForest(n_estimators=100, contamination=0.10, random_state=42)
-    iso_model.fit(X_scaled)
-    explainer = shap.Explainer(iso_model, X_scaled)
-    shap_values = explainer(X_scaled)
+with tabs[2]:
+    st.subheader("SHAP Global Importance (IF Only)")
+    if "Isolation Forest" in models:
+        expected_val, shap_values = explain_with_shap(models["Isolation Forest"], X)
+        if shap_values is not None:
+            fig, ax = plt.subplots()
+            shap.summary_plot(shap_values, X, plot_type="bar", show=False)
+            st.pyplot(fig)
 
-    st.markdown("### 🔝 Top Contributing Features (Global Summary)")
-    fig_summary, ax = plt.subplots()
-    shap.plots.bar(shap_values, max_display=5, show=False)
-    st.pyplot(fig_summary)
+            st.subheader("SHAP Force Plot (Local Explanation)")
+            index = st.number_input("Select Index", 0, len(X)-1, 0)
+            try:
+                st_shap = shap.force_plot(base_value=expected_val,
+                                          shap_values=shap_values[index],
+                                          features=X.iloc[index],
+                                          matplotlib=True, show=False)
+                st.pyplot(st_shap)
+            except Exception as e:
+                st.warning(f"SHAP force plot failed: {e}")
+    else:
+        st.warning("Isolation Forest model not available or incompatible.")
 
-    st.markdown("### 🔍 Explain a Specific Transaction")
-    transaction_idx = st.slider("Select a transaction index", 0, len(df_model)-1, 0)
-    selected_tx = df_model.iloc[transaction_idx]
-
-    st.write(f"**Transaction ID:** {selected_tx['Transaction_ID']}")
-    st.write(f"**Amount:** £{selected_tx['Invoice_Amount']} | Refund: £{selected_tx['Refund_Issued']} | Discount: £{selected_tx['Discount_Applied']}")
-    st.write(f"**Model Label:** {selected_tx['Model_Anomaly']}")
-
-    st.markdown("#### 📌 SHAP Force Plot Explanation")
-    fig_force = shap.plots.force(shap_values[transaction_idx], matplotlib=True, show=False)
-    st.pyplot(fig_force)
-
-else:
-    st.info("ℹ️ SHAP explanations are only supported for Isolation Forest.")
+with tabs[3]:
+    st.subheader("📊 Model Performance Comparison")
+    results = []
+    for name in list(models.keys()) + ["Hybrid (IF + DBSCAN)"]:
+        preds = run_model(name, X)
+        if 'Anomaly_Tag' in data.columns:
+            p, r, f, fpr = evaluate(data['Anomaly_Tag'], preds)
+        else:
+            p = r = f = fpr = 0.0
+        results.append({"Model": name, "Precision": p, "Recall": r, "F1 Score": f, "False Positive Rate": fpr})
+    df = pd.DataFrame(results)
+    st.dataframe(df.style.format({"Precision": "{:.2f}", "Recall": "{:.2f}", "F1 Score": "{:.2f}", "False Positive Rate": "{:.2%}"}))
+    st.download_button("📥 Download Comparison Table", df.to_csv(index=False), "model_comparison.csv")

@@ -1,32 +1,33 @@
 # 💸 Revenue Leakage Detection Dashboard
 
-An interactive Streamlit dashboard that detects and visualizes revenue leakage in financial transactions using multiple unsupervised machine learning models.
+This interactive Streamlit dashboard uses unsupervised machine learning models to detect **non-fraudulent financial anomalies** such as:
 
----
+- Duplicate transactions
+- Missing payments
+- Unauthorized refunds or discounts
 
-## 📌 Project Overview
-
-Businesses often suffer from revenue loss due to **unintentional errors** such as:
-- 🔁 Duplicate invoices
-- ❌ Missing payments
-- 💡 Unauthorized refunds & discounts
-
-This dashboard uses **unsupervised anomaly detection models** to proactively flag such issues and help organizations take corrective action.
+It’s designed to help businesses reduce silent revenue losses and improve transparency using interpretable AI.
 
 ---
 
 ## 🚀 Features
 
-| Feature | Description |
-|--------|-------------|
-| ^-^ Model Selector | Choose from Isolation Forest, DBSCAN, or K-Means |
-| 📋 Anomaly View | Filter detected anomalies by model or ground truth |
-| 🔍 Smart Filtering | Explore duplicates, high refunds, and more |
-| 📈 Visual Insights | Invoice vs Refund scatter plot |
-| 📥 Download | Export flagged transactions as CSV |
-| 📊 Side-by-Side Comparison | Analyze which model performs best |
+- 📤 Upload your own CSV datasets in real-time
+- 🧠 Toggle between 3 anomaly detection models:
+  - Isolation Forest
+  - DBSCAN
+  - K-Means
+- 🎯 View model precision, recall, and F1-score
+- 📋 Inspect flagged transactions via interactive tables
+- 📈 Visualize anomalies with scatter plots
+- 🧠 SHAP Explainability (for Isolation Forest)
+- 💾 Download detected anomalies for audit use
 
 ---
 
-## 🗂️ Project Structure
+## 📂 Dataset Format
 
+To use your own data, upload a `.csv` with the following columns:
+
+```csv
+Transaction_ID,Invoice_Amount,Discount_Applied,Refund_Issued,Transaction_Type,Anomaly_Tag
